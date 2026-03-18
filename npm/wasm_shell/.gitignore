@@ -1,0 +1,8 @@
+# wasm-pack output goes to ../../crates/wasm_shell/pkg/ by default
+workspace/
+# locally-copied wasm artifacts (produced by prepublishOnly)
+wasm_shell.js
+wasm_shell_bg.js
+wasm_shell_bg.wasm
+LICENSE-MIT
+LICENSE-APACHE

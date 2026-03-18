@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/bash_parser",
+    "crates/wasm_shell",
+]
+resolver = "2"

@@ -1,0 +1,28 @@
+[package]
+name = "wasm_shell"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Enable WASM / JS bindings.  Build with:
+#   wasm-pack build crates/wasm_shell --target bundler --features wasm \
+#                   --out-dir ../../npm/wasm_shell/pkg
+wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys"]
+
+[dependencies]
+bash_parser = { path = "../bash_parser" }
+async-trait = "0.1"
+thiserror = "1"
+tokio = { version = "1", features = ["io-util", "sync", "time"] }
+regex = "1"
+wasm-bindgen          = { version = "0.2", optional = true }
+wasm-bindgen-futures  = { version = "0.4", optional = true }
+js-sys                = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

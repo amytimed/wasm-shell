@@ -1,0 +1,36 @@
+{
+  "name": "wasm-shell",
+  "version": "0.1.0",
+  "description": "Sandboxed WASM shell",
+  "main": "./wasm_shell.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": "./wasm_shell.js"
+  },
+  "files": [
+    "wasm_shell.js",
+    "wasm_shell_bg.js",
+    "wasm_shell_bg.wasm",
+    "index.d.ts",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "scripts": {
+    "build": "wasm-pack build ../../crates/wasm_shell --target nodejs --features wasm",
+    "build:bundler": "wasm-pack build ../../crates/wasm_shell --target bundler --features wasm",
+    "build:web": "wasm-pack build ../../crates/wasm_shell --target web --features wasm",
+    "prepublishOnly": "npm run build && node -e \"const {copyFileSync}=require('fs');['wasm_shell.js','wasm_shell_bg.js','wasm_shell_bg.wasm'].forEach(f=>copyFileSync('../../crates/wasm_shell/pkg/'+f,f));['LICENSE-MIT','LICENSE-APACHE'].forEach(f=>copyFileSync('../../'+f,f))\"",
+    "bun-test": "bun bun-test.ts",
+    "interactive": "bun bun-interactive.ts"
+  },
+  "keywords": ["wasm", "webassembly", "shell", "bash", "sandbox", "terminal", "vfs", "emulator"],
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amytimed/wasm-shell"
+  }
+}
