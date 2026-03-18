@@ -1,5 +1,6 @@
 use std::pin::Pin;
 
+use brook_math::MathOutput;
 use regex::{Regex, RegexBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -53,6 +54,13 @@ pub(crate) fn register(shell: &mut Shell) {
     // System info
     shell.add_program("/usr/bin/uname",    |ctx| builtin_uname(ctx));
     shell.add_program("/usr/bin/neofetch", |ctx| builtin_neofetch(ctx));
+    // Calculators
+    shell.add_program("/usr/bin/bc",    |ctx| builtin_bc(ctx));
+    shell.add_program("/usr/bin/calculate", |ctx| builtin_calculate(ctx));
+
+    // Gamechanging utilities
+    shell.add_program("/usr/bin/resvg", |ctx| builtin_resvg(ctx));
+    shell.add_program("/usr/bin/toml", |ctx| builtin_toml(ctx));
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1958,4 +1966,418 @@ async fn builtin_unalias(ctx: ProgramContext) -> Result<ExitCode, ShellError> {
         }
     }
     Ok(code)
+}
+
+async fn builtin_calculate(mut ctx: ProgramContext) -> Result<ExitCode, ShellError> {
+    let args = &ctx.args[1..];
+    let expr = if args.is_empty() {
+        // No args: read from stdin.
+        let mut buf = Vec::new();
+        ctx.stdin().read_to_end(&mut buf).await.ok();
+        String::from_utf8_lossy(&buf).to_string()
+    } else {
+        args.join(" ")
+    };
+
+    let out = brook_math::evaluate_multiline(&expr);
+    match out {
+        Ok((output, computed)) => {
+            let mut result = match output {
+                MathOutput::PureExpr(_, v) => v.to_string(),
+                MathOutput::Value(v) => v.to_string(),
+                MathOutput::Ok => "OK".to_string(),
+                MathOutput::Fail(orig) => format!("no: `{}` does not hold", orig),
+            };
+            for (name, val) in computed {
+                result.push_str(&format!("\n{} = {}", name, val));
+            }
+            ctx.stdout().write_all(format!("{}\n", result).as_bytes()).await.ok();
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            let msg = format!("calculate: error: {}\n", e);
+            ctx.stderr().write_all(msg.as_bytes()).await.ok();
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+async fn builtin_bc(ctx: ProgramContext) -> Result<ExitCode, ShellError> {
+    builtin_calculate(ctx).await
+}
+
+use resvg::tiny_skia;
+use resvg::usvg;
+
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FitTo {
+    /// Keep original size.
+    Original,
+    /// Scale to width.
+    Width(u32),
+    /// Scale to height.
+    Height(u32),
+    /// Scale to size.
+    Size(u32, u32),
+    // /// Zoom by factor.
+    // Zoom(f32),
+}
+
+impl FitTo {
+    fn fit_to_size(&self, size: tiny_skia::IntSize) -> Option<tiny_skia::IntSize> {
+        match *self {
+            FitTo::Original => Some(size),
+            FitTo::Width(w) => size.scale_to_width(w),
+            FitTo::Height(h) => size.scale_to_height(h),
+            FitTo::Size(w, h) => tiny_skia::IntSize::from_wh(w, h).map(|s| size.scale_to(s)),
+            // FitTo::Zoom(z) => size.scale_by(z),
+        }
+    }
+
+    fn fit_to_transform(&self, size: tiny_skia::IntSize) -> tiny_skia::Transform {
+        let size1 = size.to_size();
+        let size2 = match self.fit_to_size(size) {
+            Some(v) => v.to_size(),
+            None => return tiny_skia::Transform::default(),
+        };
+        tiny_skia::Transform::from_scale(
+            size2.width() / size1.width(),
+            size2.height() / size1.height(),
+        )
+    }
+}
+
+async fn builtin_resvg(mut ctx: ProgramContext) -> Result<ExitCode, ShellError> {
+    let mut width:  Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut background: Option<svgtypes::Color> = None;
+    let mut input:  Option<String> = None;
+    let mut output: Option<String> = None;
+
+    if ctx.args.iter().any(|a| a == "--help") {
+        ctx.stdout().write_all(b"resvg - SVG to PNG renderer
+
+USAGE:
+  resvg [OPTIONS] <in-svg> <out-png>
+  resvg [OPTIONS] <in-svg> -c        # output to stdout
+
+OPTIONS:
+  -w, --width LENGTH     Output width in pixels
+  -h, --height LENGTH    Output height in pixels
+  --background COLOR     Background color (e.g. white, #fff, #ffffff)
+  --help                 Print this help
+
+ARGS:
+  <in-svg>   Input SVG file, or - for stdin
+  <out-png>  Output PNG file, or -c for stdout
+").await.ok();
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut i = 1;
+    while i < ctx.args.len() {
+        match ctx.args[i].as_str() {
+            "-w" | "--width" => {
+                i += 1;
+                width = ctx.args.get(i).and_then(|s| s.parse().ok());
+            }
+            "-h" | "--height" => {
+                i += 1;
+                height = ctx.args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--background" => {
+                i += 1;
+                background = ctx.args.get(i).and_then(|s| s.parse().ok());
+            }
+            a if a.starts_with("--width=") => {
+                width = a[8..].parse().ok();
+            }
+            a if a.starts_with("--height=") => {
+                height = a[9..].parse().ok();
+            }
+            a if a.starts_with("--background=") => {
+                background = a[13..].parse().ok();
+            }
+            a if a.starts_with('-') && a.len() > 1 => {
+                let msg = format!("resvg: unknown option: {}\n", a);
+                ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                return Ok(ExitCode::FAILURE);
+            }
+            _ => {
+                if input.is_none() {
+                    input = Some(ctx.args[i].clone());
+                } else {
+                    output = Some(ctx.args[i].clone());
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let input = match input {
+        Some(v) => v,
+        None => {
+            ctx.stderr().write_all(b"resvg: missing input file\n").await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    let output = match output {
+        Some(v) => v,
+        None => {
+            ctx.stderr().write_all(b"resvg: missing output file (or -c)\n").await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    let svg_data = if input == "-" {
+        read_stdin(&mut ctx).await
+    } else {
+        match ctx.read_file(&input).await {
+            Ok(d) => d,
+            Err(e) => {
+                let msg = format!("resvg: {}: {}\n", input, e);
+                ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    };
+
+    let svg_string = match std::str::from_utf8(&svg_data) {
+        Ok(s) => s,
+        Err(_) => {
+            ctx.stderr().write_all(b"resvg: input is not valid UTF-8\n").await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    let mut default_size = usvg::Size::from_wh(100.0, 100.0).unwrap();
+    let fit_to = match (width, height) {
+        (Some(w), Some(h)) => {
+            default_size = usvg::Size::from_wh(w as f32, h as f32).unwrap();
+            FitTo::Size(w, h)
+        }
+        (Some(w), None) => {
+            default_size = usvg::Size::from_wh(w as f32, 100.0).unwrap();
+            FitTo::Width(w)
+        }
+        (None, Some(h)) => {
+            default_size = usvg::Size::from_wh(100.0, h as f32).unwrap();
+            FitTo::Height(h)
+        }
+        (None, None) => FitTo::Original,
+    };
+
+    let usvg_opts = usvg::Options {
+        default_size,
+        ..usvg::Options::default()
+    };
+
+    let tree = match usvg::Tree::from_str(svg_string, &usvg_opts) {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = format!("resvg: failed to parse SVG: {}\n", e);
+            ctx.stderr().write_all(msg.as_bytes()).await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    let size = match fit_to.fit_to_size(tree.size().to_int_size()) {
+        Some(s) => s,
+        None => {
+            ctx.stderr().write_all(b"resvg: target size is zero\n").await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    let mut pixmap = match tiny_skia::Pixmap::new(size.width(), size.height()) {
+        Some(p) => p,
+        None => {
+            ctx.stderr().write_all(b"resvg: cannot allocate pixmap\n").await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    if let Some(bg) = background {
+        pixmap.fill(tiny_skia::Color::from_rgba8(bg.red, bg.green, bg.blue, bg.alpha));
+    }
+
+    let ts = fit_to.fit_to_transform(tree.size().to_int_size());
+    resvg::render(&tree, ts, &mut pixmap.as_mut());
+
+    let png_data = match pixmap.encode_png() {
+        Ok(d) => d,
+        Err(e) => {
+            let msg = format!("resvg: failed to encode PNG: {}\n", e);
+            ctx.stderr().write_all(msg.as_bytes()).await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    if output == "-c" {
+        ctx.stdout().write_all(&png_data).await.ok();
+    } else {
+        if let Err(e) = ctx.write_file(&output, png_data).await {
+            let msg = format!("resvg: {}: {}\n", output, e);
+            ctx.stderr().write_all(msg.as_bytes()).await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn builtin_toml(ctx: ProgramContext) -> Result<ExitCode, ShellError> {
+    if ctx.args.iter().any(|a| a == "--help") {
+        ctx.stdout().write_all(b"\
+toml - TOML file editor
+
+USAGE:
+  toml <file> <key> push <value>     Append a string to an array key
+  toml <file> <key> remove <value>   Remove a string from an array key
+
+NOTES:
+  File is created if it does not exist.
+  File is always rewritten with 4-space indentation.
+
+EXAMPLES:
+  toml memory.toml notes push \"hello\"
+  toml memory.toml notes remove \"hello\"
+").await.ok();
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let args = &ctx.args[1..];
+    if args.len() < 4 {
+        ctx.stderr().write_all(b"toml: usage: toml <file> <key> <push|remove> <value>\n").await.ok();
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let file  = &args[0];
+    let key   = &args[1];
+    let op    = args[2].as_str();
+    let value = &args[3];
+
+    let (mut table, created) = match ctx.read_file(file).await {
+        Ok(data) => {
+            let s = String::from_utf8_lossy(&data);
+            match toml::from_str::<toml::Table>(&s) {
+                Ok(t)  => (t, false),
+                Err(e) => {
+                    let msg = format!("toml: parse error in {}: {}\n", file, e);
+                    ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
+        Err(_) => (toml::Table::new(), true),
+    };
+
+    if created {
+        ctx.stdout().write_all(format!("toml: created {}\n", file).as_bytes()).await.ok();
+    }
+
+    match op {
+        "push" => {
+            let entry = table
+                .entry(key.as_str())
+                .or_insert_with(|| toml::Value::Array(Vec::new()));
+            match entry {
+                toml::Value::Array(v) => v.push(toml::Value::String(value.clone())),
+                _ => {
+                    let msg = format!("toml: '{}' is not an array\n", key);
+                    ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
+        "remove" => {
+            match table.get_mut(key.as_str()) {
+                Some(toml::Value::Array(v)) => {
+                    let before = v.len();
+                    v.retain(|item| item.as_str() != Some(value.as_str()));
+                    if v.len() == before {
+                        let msg = format!("toml: '{}' not found in '{}'\n", value, key);
+                        ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                        return Ok(ExitCode::FAILURE);
+                    }
+                }
+                Some(_) => {
+                    let msg = format!("toml: '{}' is not an array\n", key);
+                    ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                    return Ok(ExitCode::FAILURE);
+                }
+                None => {
+                    let msg = format!("toml: key '{}' not found\n", key);
+                    ctx.stderr().write_all(msg.as_bytes()).await.ok();
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
+        _ => {
+            let msg = format!("toml: unknown operation '{}' (expected push or remove)\n", op);
+            ctx.stderr().write_all(msg.as_bytes()).await.ok();
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+
+    let formatted = toml_format_table(&table);
+    if let Err(e) = ctx.write_file(file, formatted.into_bytes()).await {
+        let msg = format!("toml: failed to write {}: {}\n", file, e);
+        ctx.stderr().write_all(msg.as_bytes()).await.ok();
+        return Ok(ExitCode::FAILURE);
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn toml_format_table(table: &toml::Table) -> String {
+    let mut out = String::new();
+    for (key, val) in table {
+        out.push_str(&format!("{} = {}\n", key, toml_format_val(val)));
+    }
+    out
+}
+
+fn toml_format_val(val: &toml::Value) -> String {
+    match val {
+        toml::Value::String(s)   => toml_escape_str(s),
+        toml::Value::Integer(i)  => i.to_string(),
+        toml::Value::Float(f)    => f.to_string(),
+        toml::Value::Boolean(b)  => b.to_string(),
+        toml::Value::Datetime(d) => d.to_string(),
+        toml::Value::Array(arr)  => {
+            if arr.is_empty() {
+                return "[]".to_string();
+            }
+            let mut s = String::from("[\n");
+            for item in arr {
+                s.push_str(&format!("    {},\n", toml_format_val(item)));
+            }
+            s.push(']');
+            s
+        }
+        toml::Value::Table(t) => {
+            let pairs: Vec<String> = t.iter()
+                .map(|(k, v)| format!("{} = {}", k, toml_format_val(v)))
+                .collect();
+            format!("{{ {} }}", pairs.join(", "))
+        }
+    }
+}
+
+fn toml_escape_str(s: &str) -> String {
+    let mut out = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c    => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

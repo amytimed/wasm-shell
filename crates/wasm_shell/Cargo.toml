@@ -23,6 +23,10 @@ regex = "1"
 wasm-bindgen          = { version = "0.2", optional = true }
 wasm-bindgen-futures  = { version = "0.4", optional = true }
 js-sys                = { version = "0.3", optional = true }
+brook_math = { git = "https://github.com/amytimed/brook_math" }
+resvg = { version = "0.47.0", default-features = false, features = ["text", "raster-images"] }
+svgtypes = "0.16.1"
+toml = "1.0.7"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
