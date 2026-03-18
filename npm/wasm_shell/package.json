@@ -1,11 +1,14 @@
 {
   "name": "wasm-shell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sandboxed WASM shell",
   "main": "./wasm_shell.js",
   "types": "./index.d.ts",
   "exports": {
-    ".": "./wasm_shell.js"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./wasm_shell.js"
+    }
   },
   "files": [
     "wasm_shell.js",
