@@ -1,0 +1,38 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_wasmprogramcontext_free: (a: number, b: number) => void;
+export const __wbg_wasmshell_free: (a: number, b: number) => void;
+export const wasmprogramcontext_args: (a: number) => any;
+export const wasmprogramcontext_cwd: (a: number) => [number, number];
+export const wasmprogramcontext_env: (a: number) => any;
+export const wasmprogramcontext_getEnv: (a: number, b: number, c: number) => [number, number];
+export const wasmprogramcontext_readStdin: (a: number) => any;
+export const wasmprogramcontext_setEnv: (a: number, b: number, c: number, d: number, e: number) => void;
+export const wasmprogramcontext_unsetEnv: (a: number, b: number, c: number) => void;
+export const wasmprogramcontext_writeStderr: (a: number, b: number, c: number) => void;
+export const wasmprogramcontext_writeStdout: (a: number, b: number, c: number) => void;
+export const wasmshell_addProgram: (a: number, b: number, c: number, d: any) => void;
+export const wasmshell_exec: (a: number, b: number, c: number) => any;
+export const wasmshell_getCwd: (a: number) => [number, number];
+export const wasmshell_getEnv: (a: number, b: number, c: number) => [number, number];
+export const wasmshell_mount: (a: number, b: number, c: number, d: any) => [number, number];
+export const wasmshell_new: () => number;
+export const wasmshell_onStderr: (a: number, b: any) => void;
+export const wasmshell_onStdout: (a: number, b: any) => void;
+export const wasmshell_readFile: (a: number, b: number, c: number) => any;
+export const wasmshell_setCwd: (a: number, b: number, c: number) => void;
+export const wasmshell_setEnv: (a: number, b: number, c: number, d: number, e: number) => void;
+export const wasmshell_setStdin: (a: number, b: number, c: number) => void;
+export const wasmshell_writeFile: (a: number, b: number, c: number, d: number, e: number) => any;
+export const wasm_bindgen__closure__destroy__h1689aa9aa387eacc: (a: number, b: number) => void;
+export const wasm_bindgen__convert__closures_____invoke__h75e5c0d4c42842fc: (a: number, b: number, c: any) => [number, number];
+export const wasm_bindgen__convert__closures_____invoke__h4225af512b24117d: (a: number, b: number, c: any, d: any) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

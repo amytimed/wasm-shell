@@ -9,6 +9,7 @@
 //! ```
 #![allow(unsafe_code)] // SendMe / SendFut require unsafe — safe on single-threaded WASM
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -245,6 +246,8 @@ interface WasmShell {
     onStdout(callback: (data: Uint8Array) => void): void;
     /** Register a callback invoked with stderr bytes after each `exec` call. */
     onStderr(callback: (data: Uint8Array) => void): void;
+    /** Returns `true` when no `exec` is currently in progress. */
+    isAvailable(): boolean;
 }
 
 interface WasmProgramContext {
@@ -366,10 +369,15 @@ impl WasmProgramContext {
 /// ```
 #[wasm_bindgen]
 pub struct WasmShell {
-    inner: Shell,
+    // Held behind RefCell<Option<>> so that `exec` can move the Shell out
+    // before awaiting — letting wasm-bindgen use a shared (&self) borrow for
+    // the whole async span.  While exec is running, `inner` is `None`; any
+    // re-entrant call sees `None` and returns a graceful error instead of the
+    // cryptic "recursive use of an object" panic from wasm-bindgen.
+    inner: RefCell<Option<Shell>>,
     stdout_cb: Option<Function>,
     stderr_cb: Option<Function>,
-    stdin_bytes: Vec<u8>,
+    stdin_bytes: RefCell<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -378,11 +386,27 @@ impl WasmShell {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmShell {
         WasmShell {
-            inner: Shell::new(),
+            inner: RefCell::new(Some(Shell::new())),
             stdout_cb: None,
             stderr_cb: None,
-            stdin_bytes: Vec::new(),
+            stdin_bytes: RefCell::new(Vec::new()),
         }
+    }
+
+    // ── Availability ─────────────────────────────────────────────────────────
+
+    /// Returns `true` when no `exec` is currently in progress.
+    ///
+    /// ```js
+    /// if (!shell.isAvailable()) {
+    ///   console.error("shell is busy");
+    ///   return;
+    /// }
+    /// await shell.exec("echo hi");
+    /// ```
+    #[wasm_bindgen(js_name = isAvailable)]
+    pub fn is_available(&self) -> bool {
+        self.inner.borrow().is_some()
     }
 
     // ── Program registration ──────────────────────────────────────────────────
@@ -397,26 +421,28 @@ impl WasmShell {
     #[wasm_bindgen(js_name = addProgram, skip_typescript)]
     pub fn add_program(&mut self, name: &str, callback: Function) {
         let cb = SendMe(callback);
-        self.inner.add_program(name, move |ctx: ProgramContext| {
-            // Clone the JS function handle and wrap as Send (safe: WASM is single-threaded).
-            let f = SendMe(cb.0.clone());
-            let wasm_ctx = WasmProgramContext { ctx };
-            // Convert to JsValue synchronously, then wrap as Send.
-            let wasm_ctx_val = SendMe(JsValue::from(wasm_ctx));
-            // Return a future that is Send (via SendFut) so it satisfies ProgramFuture.
-            SendFut(async move {
-                let promise_val = f
-                    .0
-                    .call1(&JsValue::NULL, &wasm_ctx_val.0)
-                    .map_err(|e| ShellError::Io(format!("addProgram callback error: {e:?}")))?;
-                let result =
-                    JsFuture::from(Promise::from(promise_val))
-                        .await
-                        .map_err(|e| ShellError::Io(format!("addProgram callback failed: {e:?}")))?;
-                let code = result.as_f64().unwrap_or(0.0) as i32;
-                Ok(ExitCode(code))
-            })
-        });
+        self.inner.borrow_mut().as_mut()
+            .expect("cannot addProgram while exec is running")
+            .add_program(name, move |ctx: ProgramContext| {
+                // Clone the JS function handle and wrap as Send (safe: WASM is single-threaded).
+                let f = SendMe(cb.0.clone());
+                let wasm_ctx = WasmProgramContext { ctx };
+                // Convert to JsValue synchronously, then wrap as Send.
+                let wasm_ctx_val = SendMe(JsValue::from(wasm_ctx));
+                // Return a future that is Send (via SendFut) so it satisfies ProgramFuture.
+                SendFut(async move {
+                    let promise_val = f
+                        .0
+                        .call1(&JsValue::NULL, &wasm_ctx_val.0)
+                        .map_err(|e| ShellError::Io(format!("addProgram callback error: {e:?}")))?;
+                    let result =
+                        JsFuture::from(Promise::from(promise_val))
+                            .await
+                            .map_err(|e| ShellError::Io(format!("addProgram callback failed: {e:?}")))?;
+                    let code = result.as_f64().unwrap_or(0.0) as i32;
+                    Ok(ExitCode(code))
+                })
+            });
     }
 
     // ── Mount API ─────────────────────────────────────────────────────────────
@@ -450,7 +476,9 @@ impl WasmShell {
             stat_fn:   SendMe(get_fn("stat")?),
             remove_fn: SendMe(get_fn("remove")?),
         });
-        self.inner.mount(virtual_path, point);
+        self.inner.borrow_mut().as_mut()
+            .expect("cannot mount while exec is running")
+            .mount(virtual_path, point);
         Ok(())
     }
 
@@ -460,14 +488,26 @@ impl WasmShell {
     ///
     /// Resolves with a plain JS object `{ code: number, stdout: Uint8Array, stderr: Uint8Array }`.
     /// Any bytes pre-loaded via `setStdin` are consumed by this call.
+    ///
+    /// Rejects with an error if called while a previous `exec` is still running.
+    /// Use `isAvailable()` to check before calling.
     #[wasm_bindgen(skip_typescript)]
-    pub async fn exec(&mut self, src: &str) -> Result<JsValue, JsValue> {
-        let stdin = std::mem::take(&mut self.stdin_bytes);
-        let output = self
-            .inner
-            .exec_with_stdin(src, stdin)
-            .await
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    pub async fn exec(&self, src: &str) -> Result<JsValue, JsValue> {
+        // Take the Shell out of the cell.  If it's already None, a previous
+        // exec is still in flight — return a clean error instead of panicking.
+        let mut shell = self.inner.borrow_mut().take()
+            .ok_or_else(|| JsValue::from_str("shell is busy: exec is already running"))?;
+
+        let stdin = std::mem::take(&mut *self.stdin_bytes.borrow_mut());
+
+        // Await with only a local `shell` — no borrow of `self.inner` is held
+        // across this point, so wasm-bindgen won't see re-entrant access.
+        let result = shell.exec_with_stdin(src, stdin).await;
+
+        // Always return the Shell before propagating any error.
+        *self.inner.borrow_mut() = Some(shell);
+
+        let output = result.map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Deliver output to registered callbacks.
         if let Some(cb) = &self.stdout_cb {
@@ -515,7 +555,7 @@ impl WasmShell {
     /// The bytes are consumed on the next `exec`.
     #[wasm_bindgen(js_name = setStdin)]
     pub fn set_stdin(&mut self, data: &[u8]) {
-        self.stdin_bytes = data.to_vec();
+        *self.stdin_bytes.borrow_mut() = data.to_vec();
     }
 
     // ── VFS access ────────────────────────────────────────────────────────────
@@ -523,11 +563,11 @@ impl WasmShell {
     /// Read a file from the virtual filesystem. Returns a `Uint8Array`.
     #[wasm_bindgen(js_name = readFile)]
     pub async fn read_file(&self, path: &str) -> Result<Uint8Array, JsValue> {
-        let data = self
-            .inner
-            .fs
-            .lock()
-            .await
+        // Clone the Arc so we don't hold the RefCell borrow across the await.
+        let fs = self.inner.borrow().as_ref()
+            .ok_or_else(|| JsValue::from_str("shell is busy"))?
+            .fs.clone();
+        let data = fs.lock().await
             .read_file(path)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -536,14 +576,15 @@ impl WasmShell {
 
     /// Write bytes to a file in the virtual filesystem.
     #[wasm_bindgen(js_name = writeFile)]
-    pub async fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), JsValue> {
-        self.inner
-            .fs
-            .lock()
-            .await
+    pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<(), JsValue> {
+        let fs = self.inner.borrow().as_ref()
+            .ok_or_else(|| JsValue::from_str("shell is busy"))?
+            .fs.clone();
+        let result = fs.lock().await
             .write_file(path, data.to_vec())
             .await
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(|e| JsValue::from_str(&e.to_string()));
+        result
     }
 
     // ── Environment ───────────────────────────────────────────────────────────
@@ -551,25 +592,29 @@ impl WasmShell {
     /// Set an environment variable on the shell.
     #[wasm_bindgen(js_name = setEnv)]
     pub fn set_env(&mut self, key: &str, value: &str) {
-        self.inner.set_env(key, value);
+        self.inner.borrow_mut().as_mut()
+            .expect("cannot setEnv while exec is running")
+            .set_env(key, value);
     }
 
     /// Get an environment variable from the shell.
     #[wasm_bindgen(js_name = getEnv)]
     pub fn get_env(&self, key: &str) -> Option<String> {
-        self.inner.get_env(key).map(|s| s.to_owned())
+        self.inner.borrow().as_ref()?.get_env(key).map(|s| s.to_owned())
     }
 
     /// Get the current working directory.
     #[wasm_bindgen(js_name = getCwd)]
     pub fn get_cwd(&self) -> String {
-        self.inner.cwd.clone()
+        self.inner.borrow().as_ref().map(|s| s.cwd.clone()).unwrap_or_default()
     }
 
     /// Set the current working directory (does not validate against VFS).
     #[wasm_bindgen(js_name = setCwd)]
     pub fn set_cwd(&mut self, path: &str) {
-        self.inner.cwd = crate::vfs::normalize_path(path);
+        if let Some(shell) = self.inner.borrow_mut().as_mut() {
+            shell.cwd = crate::vfs::normalize_path(path);
+        }
     }
 }
 

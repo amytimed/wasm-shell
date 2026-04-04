@@ -234,15 +234,12 @@ fn walk_dir_inner<'a>(
         let mut sorted = entries;
         sorted.sort();
         for entry in sorted {
-            let full = if dir == base {
-                format!("{}/{}", dir, entry)
-            } else {
-                format!("{}/{}", dir, entry)
-            };
-            out.push(full.clone());
+            let full = format!("{}/{}", dir, entry);
             if let Ok(s) = ctx.stat(&full).await {
                 if s.is_dir {
                     walk_dir_inner(ctx, base, &full, out).await;
+                } else {
+                    out.push(full);
                 }
             }
         }

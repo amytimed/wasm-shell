@@ -1,6 +1,6 @@
 [package]
 name = "wasm_shell"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -27,6 +27,9 @@ brook_math = { git = "https://github.com/amytimed/brook_math" }
 resvg = { version = "0.47.0", default-features = false, features = ["text", "raster-images"] }
 svgtypes = "0.16.1"
 toml = "1.0.7"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
